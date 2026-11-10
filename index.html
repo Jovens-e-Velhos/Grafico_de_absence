@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weekly Meeting Absence</title>
+  <meta name="description" content="Acompanhamento de faltas da Weekly Meeting a partir das planilhas de presença (.xlsx). Os dados são processados apenas no navegador.">
+  <link rel="icon" type="image/png" href="assets/dsv-logo.png">
+  <link rel="stylesheet" href="assets/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js" defer></script>
+  <script src="assets/app.js" defer></script>
+</head>
+<body>
+  <header class="topo">
+    <div class="wrap">
+      <img class="topo__logo" src="assets/dsv-logo-branco.png" alt="DSV" width="96" height="29">
+    </div>
+    <div class="wrap topo__inner">
+      <div>
+        <p class="eyebrow">Customs Department · Weekly Meeting</p>
+        <h1>Acompanhamento<br>de faltas</h1>
+      </div>
+      <div class="topo__acoes">
+        <label class="btn btn--claro" for="arquivos">Adicionar planilhas</label>
+        <input id="arquivos" type="file" accept=".xlsx,.xlsm,.xls,.ods,.csv,.zip" multiple hidden>
+      </div>
+    </div>
+  </header>
+
+  <!-- Estado vazio -->
+  <section id="vazio" class="wrap vazio">
+    <label id="drop" class="drop" for="arquivos">
+      <span class="drop__icone" aria-hidden="true">
+        <svg viewBox="0 0 48 48" width="48" height="48"><rect x="8" y="6" width="32" height="36" fill="none" stroke="currentColor" stroke-width="3"/><path d="M24 16v16M16 24l8 8 8-8" fill="none" stroke="currentColor" stroke-width="3"/></svg>
+      </span>
+      <strong>Arraste aqui uma ou mais planilhas ou um arquivo .zip</strong>
+      <span>ou clique para selecionar. Aceita .xlsx, .xlsm, .xls, .ods, .csv e .zip com planilhas dentro.<br>Cada planilha é tratada como uma semana (ex.: “WM43 …”).</span>
+    </label>
+  </section>
+
+  <main id="painel" class="painel" hidden>
+    <!-- Arquivos e filtros -->
+    <section class="wrap barra">
+      <div id="chips" class="chips" aria-label="Arquivos carregados"></div>
+      <div id="filtros" class="filtros"></div>
+    </section>
+    <div id="erros" class="wrap"></div>
+
+    <!-- KPIs -->
+    <section class="faixa-azul">
+      <div class="wrap">
+        <h2 class="titulo-faixa">Visão geral <span id="recorte" class="recorte"></span></h2>
+        <div class="kpis">
+          <div class="kpi"><span class="kpi__valor" data-kpi="total">0</span><span class="kpi__rotulo">Participantes esperados</span></div>
+          <div class="kpi"><span class="kpi__valor" data-kpi="presentes">0</span><span class="kpi__rotulo">Presentes</span></div>
+          <div class="kpi"><span class="kpi__valor" data-kpi="faltas">0</span><span class="kpi__rotulo">Faltas <b data-kpi-pct="faltas"></b></span></div>
+          <div class="kpi"><span class="kpi__valor" data-kpi="justificadas">0</span><span class="kpi__rotulo">Justificadas <b data-kpi-extra="justificadas"></b></span></div>
+          <div class="kpi kpi--alerta"><span class="kpi__valor" data-kpi="injustificadas">0</span><span class="kpi__rotulo">Injustificadas</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Hierarquia -->
+    <section class="wrap secao revela">
+      <div class="secao__cab">
+        <div>
+          <h2>Faltas por nível hierárquico</h2>
+          <p class="sub">Pessoas ausentes por responsável, divididas pelo tipo de falta. Passe o mouse para ver equipe e percentual.</p>
+        </div>
+        <details class="config">
+          <summary>Configurar hierarquia</summary>
+          <div id="config-niveis" class="config__corpo"></div>
+        </details>
+      </div>
+      <div id="abas" class="abas" role="tablist"></div>
+      <div class="cartao">
+        <div id="g-hier" class="grafico"></div>
+        <details class="tabela-det">
+          <summary>Ver tabela</summary>
+          <div id="t-hier"></div>
+        </details>
+      </div>
+    </section>
+
+    <!-- Justificadas -->
+    <section class="wrap secao revela">
+      <div class="secao__cab">
+        <div>
+          <h2>Faltas justificadas</h2>
+          <p class="sub">Contagem de cada opção de “Justificativa Base” e dos motivos informados em “Outro (detalhado)”.</p>
+        </div>
+      </div>
+      <div class="grade-3">
+        <div class="cartao">
+          <h3>Composição das faltas</h3>
+          <div id="g-donut" class="grafico grafico--donut"></div>
+        </div>
+        <div class="cartao">
+          <h3>Por Justificativa Base <span class="sub-inline">(exceto “Outros”)</span></h3>
+          <div id="g-just" class="grafico"></div>
+        </div>
+        <div class="cartao">
+          <h3>Justificadas via “Outros”</h3>
+          <div id="g-outros" class="grafico"></div>
+        </div>
+      </div>
+      <details class="tabela-det cartao">
+        <summary>Ver colaboradores com falta justificada</summary>
+        <div id="t-just"></div>
+      </details>
+    </section>
+
+    <!-- Injustificadas -->
+    <section class="wrap secao revela">
+      <div class="secao__cab">
+        <div>
+          <h2>Faltas injustificadas</h2>
+          <p class="sub">Justificativa Base = “Outros (detalhe ao lado)” e Report = “Absence”.</p>
+        </div>
+      </div>
+      <div class="cartao cartao--destaque">
+        <div id="t-inj"></div>
+      </div>
+      <div id="sem-base"></div>
+    </section>
+
+    <!-- Evolução -->
+    <section id="sec-evo" class="wrap secao revela" hidden>
+      <div class="secao__cab">
+        <div>
+          <h2>Evolução semanal</h2>
+          <p class="sub">Faltas por tipo em todas as semanas carregadas (respeita os filtros de Branch e Office).</p>
+        </div>
+      </div>
+      <div class="cartao"><div id="g-evo" class="grafico grafico--linha"></div></div>
+    </section>
+
+    <section class="wrap secao revela">
+      <details class="tabela-det cartao">
+        <summary>Todos os ausentes do recorte</summary>
+        <div id="t-todos"></div>
+      </details>
+    </section>
+  </main>
+
+  <footer class="rodape">
+    <div class="wrap">Dados processados localmente no navegador · Nenhuma informação é armazenada ou enviada.</div>
+  </footer>
+</body>
+</html>
