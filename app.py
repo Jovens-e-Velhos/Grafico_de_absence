@@ -3,9 +3,10 @@
 Rodar:  streamlit run app.py   (ou dar duplo clique em iniciar.bat)
 
 Fluxo geral do arquivo:
+  0. O usuário escolhe o modelo de planilha (atual ou layout antigo de integração).
   1. Carrega as planilhas (enviadas pela barra lateral e/ou .xlsx da pasta do projeto).
   2. Deixa o usuário escolher qual coluna representa cada nível hierárquico.
-  3. Aplica os filtros (Semana, Branch, Office).
+  3. Aplica o filtro de Semana.
   4. Mostra KPIs, faltas por hierarquia, justificadas, injustificadas e evolução semanal.
 
 As regras de leitura e classificação das faltas ficam em processamento.py;
@@ -46,8 +47,8 @@ st.set_page_config(page_title="Faltas Weekly Meeting", page_icon="📊", layout=
 
 # ---------------------------------------------------------------- dados
 @st.cache_data(show_spinner="Lendo planilhas…")
-def carregar_cache(itens: tuple[tuple[str, bytes], ...]):
-    """Lê as planilhas e devolve (dados, erros).
+def carregar_cache(itens: tuple[tuple[str, bytes], ...], modelo: str):
+    """Lê as planilhas no modelo escolhido e devolve (dados, erros, outro_modelo).
 
     O resultado fica em cache: enquanto os mesmos arquivos estiverem carregados,
     mexer nos filtros não faz o app reler as planilhas do zero.
@@ -55,11 +56,17 @@ def carregar_cache(itens: tuple[tuple[str, bytes], ...]):
     precisa de argumentos imutáveis para comparar.
     """
     import io
-    return P.carregar([(nome, io.BytesIO(conteudo)) for nome, conteudo in itens])
+    return P.carregar([(nome, io.BytesIO(conteudo)) for nome, conteudo in itens], modelo)
 
 
-# Barra lateral: envio de arquivos.
+# Barra lateral: modelo de planilha e envio de arquivos.
 with st.sidebar:
+    st.header("Modelo de planilha")
+    # atual: Report1 + Justificativa Base + Report; antigo: só a coluna Report (planilhas de integração)
+    modelo = st.radio("Modelo de planilha", ["atual", "antigo"], label_visibility="collapsed",
+                      format_func={"atual": "Atual", "antigo": "Antigo (integração)"}.get)
+    st.caption("Atual: colunas Report1, Justificativa Base, Report e Outro (detalhado)." if modelo == "atual" else
+               "Antigo: só a coluna Report, com Yes, Absence ou o motivo da falta.")
     st.header("Arquivos")
     enviados = st.file_uploader("Envie um ou mais .xlsx", type="xlsx", accept_multiple_files=True)
     # Por padrão, usa os .xlsx da pasta do projeto só quando nada foi enviado.
@@ -67,6 +74,7 @@ with st.sidebar:
 
 # Monta a lista de arquivos a processar: primeiro os enviados, depois os da pasta.
 itens = []
+erros_pasta = []  # arquivos da pasta que não puderam ser lidos (ex.: abertos no Excel)
 if enviados:
     itens += [(f.name, f.getvalue()) for f in enviados]
 if usar_pasta:
@@ -75,17 +83,34 @@ if usar_pasta:
         # Ignora arquivos temporários do Excel (~$...) e os que já vieram pelo upload,
         # para não contar a mesma semana duas vezes.
         if not p.name.startswith("~$") and p.name not in nomes_enviados:
-            itens.append((p.name, p.read_bytes()))
+            try:
+                itens.append((p.name, p.read_bytes()))
+            except OSError:  # o Excel trava o arquivo enquanto ele está aberto
+                erros_pasta.append(f"{p.name}: {P.MSG_ARQUIVO_TRAVADO}")
+
+if erros_pasta and not itens:
+    st.error("**Não foi possível carregar os arquivos**\n\n" + "\n".join(f"- {e}" for e in erros_pasta), icon="⚠️")
+    st.stop()
 
 if not itens:
     st.info("Envie ao menos um arquivo .xlsx na barra lateral.")
     st.stop()  # interrompe a execução: não há nada para mostrar
 
-dados, erros = carregar_cache(tuple(itens))
-for e in erros:  # ex.: planilha sem a aba esperada ou sem colunas obrigatórias
-    st.sidebar.error(e)
+dados, erros, outro_modelo = carregar_cache(tuple(itens), modelo)
+# Planilhas da pasta do projeto que são do outro modelo não são erro: a pasta pode ter
+# os dois tipos. Elas só são listadas discretamente na barra lateral.
+enviados_nomes = {f.name for f in enviados or []}
+ignorados = [n for n in outro_modelo if n not in enviados_nomes]
+erros = erros_pasta + [e for e in erros if e.split(": ", 1)[0] not in ignorados]
+if ignorados:
+    st.sidebar.caption("Na pasta, mas de outro modelo (ignorados): " + ", ".join(ignorados))
+# Arquivos que não puderam ser carregados aparecem no topo da página, com o motivo
+# (nome sem a semana, colunas faltando, arquivo corrompido, semana repetida...).
+if erros:
+    titulo = "Não foi possível carregar 1 arquivo" if len(erros) == 1 else f"Não foi possível carregar {len(erros)} arquivos"
+    st.error(f"**{titulo}**\n\n" + "\n".join(f"- {e}" for e in erros), icon="⚠️")
 if dados.empty:
-    st.stop()
+    st.stop()  # nenhum arquivo válido: só o aviso acima é exibido
 
 # ---------------------------------------------------------------- hierarquia
 # Cada nível (Líder Direto, Supervisor, Gerente) pode ser ligado a qualquer coluna de
@@ -118,17 +143,11 @@ with st.sidebar:
 # ---------------------------------------------------------------- filtros
 # Cada arquivo corresponde a uma semana (ex.: "WM43", lido do nome do arquivo).
 semanas = sorted(dados["semana"].unique())
-c1, c2, c3 = st.columns(3)
+c1, _ = st.columns([1, 2])
 sel_semanas = c1.multiselect("Semana", semanas, default=semanas[-1:])  # padrão: semana mais recente
-sel_branch = c2.multiselect("Branch", sorted(dados["branch"].unique()))
-sel_office = c3.multiselect("Office Location", sorted(dados["office"].unique()))
 
-# Aplica os filtros. Filtro vazio = sem restrição (todas as semanas/branches/offices).
+# Aplica o filtro. Nenhuma semana marcada = todas as semanas.
 df = dados[dados["semana"].isin(sel_semanas or semanas)]
-if sel_branch:
-    df = df[df["branch"].isin(sel_branch)]
-if sel_office:
-    df = df[df["office"].isin(sel_office)]
 
 # Todos os que não estavam presentes, seja qual for o tipo de falta.
 ausentes = df[df["classificacao"] != P.PRESENTE]
@@ -144,9 +163,11 @@ k = st.columns(5)
 k[0].metric("Participantes esperados", n_total)
 k[1].metric("Presentes", n_total - n_aus)
 k[2].metric("Faltas", n_aus, f"{n_aus / n_total:.1%} do total" if n_total else None, delta_color="off")
-# "Justificadas" soma as justificadas normais e as justificadas via "Outros".
+# "Justificadas" soma as justificadas normais e as justificadas via "Outros"
+# (o layout antigo não tem a opção "Outros", então o detalhe só aparece no modelo atual).
 k[3].metric("Justificadas", int(cont.get(P.JUSTIFICADA, 0) + cont.get(P.JUSTIFICADA_OUTROS, 0)),
-            f"{int(cont.get(P.JUSTIFICADA_OUTROS, 0))} via 'Outros'", delta_color="off")
+            f"{int(cont.get(P.JUSTIFICADA_OUTROS, 0))} via 'Outros'" if modelo == "atual" else None,
+            delta_color="off")
 k[4].metric("Injustificadas", int(cont.get(P.INJUSTIFICADA, 0)))
 
 
@@ -217,10 +238,14 @@ def tabela(d: pd.DataFrame, nome_csv: str):
 
 
 # Colunas exibidas nas tabelas de pessoas: nome interno -> título na tabela.
+# As colunas de justificativa dependem do modelo de planilha.
 COLS_PESSOA = {"semana": "Semana", "nome": "Nome", "lider": "Líder Direto", "supervisor": "Supervisor",
                "gestor": "Gestor", "gerente": "Gerente", "branch": "Branch", "office": "Office",
-               "just_base": "Justificativa Base", "report": "Report", "outro": "Outro (detalhado)",
+               **({"report": "Report", "obs": "Injustificada (comentário)"} if modelo == "antigo" else
+                  {"just_base": "Justificativa Base", "report": "Report", "outro": "Outro (detalhado)"}),
                "classificacao": "Classificação"}
+# Nome, na tabela, da coluna de comentário da falta injustificada.
+COL_COMENTARIO = COLS_PESSOA["obs" if modelo == "antigo" else "outro"]
 
 
 def pessoas(d: pd.DataFrame) -> pd.DataFrame:
@@ -245,48 +270,53 @@ elif niveis_ativos:
     abas = st.tabs([f"{NIVEIS[n]} ({opcoes[c]})" if opcoes[c] != NIVEIS[n] else NIVEIS[n] for n, c in niveis_ativos.items()])
     for aba, (nivel, coluna) in zip(abas, niveis_ativos.items()):
         with aba:
-            tab = P.faltas_por(df, coluna)  # faltas agrupadas pela coluna escolhida
+            tab = P.faltas_por(df, coluna, P.MODELOS[modelo]["cats"])  # faltas agrupadas pela coluna escolhida
             st.plotly_chart(barras_empilhadas(tab, NIVEIS[nivel]), use_container_width=True, key=f"g_{nivel}")
             with st.expander("Ver tabela"):
                 tabela(tab.reset_index().rename(columns={coluna: NIVEIS[nivel]}), f"faltas_por_{nivel}.csv")
 
 # ---------------------------------------------------------------- 2. justificadas
 st.subheader("Faltas justificadas")
-col_a, col_b = st.columns(2)
+# O layout antigo só tem o gráfico "Por motivo"; o modelo atual tem também o de "Outros".
+col_a, col_b = st.columns(2) if modelo == "atual" else (st.container(), None)
 with col_a:
-    # Quantas vezes cada opção de "Justificativa Base" foi escolhida (sem contar "Outros").
-    st.markdown("**Por Justificativa Base** (exceto 'Outros')")
-    just = ausentes[ausentes["classificacao"] == P.JUSTIFICADA]["just_base"].value_counts()
+    # Quantas vezes cada motivo foi informado: opção de "Justificativa Base" (sem contar "Outros")
+    # no modelo atual; valor da coluna "Report" no layout antigo.
+    st.markdown("**Por Justificativa Base** (exceto 'Outros')" if modelo == "atual" else "**Por motivo** (coluna 'Report')")
+    just = ausentes[ausentes["classificacao"] == P.JUSTIFICADA]["motivo"].value_counts()
     if just.empty:
         st.caption("Nenhuma.")
     else:
         st.plotly_chart(barras_simples(just), use_container_width=True, key="g_just")
-with col_b:
-    # "Outros" com Report diferente de "Absence" conta como justificada; aqui aparece
-    # o motivo escrito em "Outro (detalhado)". "outro_agrupado" é esse texto em minúsculas,
-    # para que "Férias" e "férias" sejam contados juntos.
-    st.markdown("**Justificadas via 'Outros'** — motivo informado em 'Outro (detalhado)'")
-    outros_j = ausentes[ausentes["classificacao"] == P.JUSTIFICADA_OUTROS]["outro_agrupado"].value_counts()
-    if outros_j.empty:
-        st.caption("Nenhuma.")
-    else:
-        st.plotly_chart(barras_simples(outros_j), use_container_width=True, key="g_outros_j")
+if col_b is not None:
+    with col_b:
+        # "Outros" com Report diferente de "Absence" conta como justificada; aqui aparece
+        # o motivo escrito em "Outro (detalhado)". "outro_agrupado" é esse texto em minúsculas,
+        # para que "Férias" e "férias" sejam contados juntos.
+        st.markdown("**Justificadas via 'Outros'** — motivo informado em 'Outro (detalhado)'")
+        outros_j = ausentes[ausentes["classificacao"] == P.JUSTIFICADA_OUTROS]["outro_agrupado"].value_counts()
+        if outros_j.empty:
+            st.caption("Nenhuma.")
+        else:
+            st.plotly_chart(barras_simples(outros_j), use_container_width=True, key="g_outros_j")
 with st.expander("Ver colaboradores com falta justificada"):
     tabela(pessoas(ausentes[ausentes["classificacao"].isin([P.JUSTIFICADA, P.JUSTIFICADA_OUTROS])]),
            "faltas_justificadas.csv")
 
 # ---------------------------------------------------------------- 3. injustificadas
 st.subheader("Faltas injustificadas")
-st.caption("Justificativa Base = 'Outros (detalhe ao lado)' e Report = 'Absence'.")
+st.caption("Justificativa Base = 'Outros (detalhe ao lado)' e Report = 'Absence'." if modelo == "atual" else
+           "Report = 'Absence'. O comentário vem da coluna 'Injustificada', quando preenchida.")
 inj = ausentes[ausentes["classificacao"] == P.INJUSTIFICADA]
 if inj.empty:
     st.success("Nenhuma falta injustificada.")
 else:
-    # Tabela enxuta: quem faltou, a quem responde e o que foi escrito em "Outro (detalhado)".
+    # Tabela enxuta: quem faltou, a quem responde e o comentário ("Outro (detalhado)" no
+    # modelo atual, coluna "Injustificada" no layout antigo).
     # Supervisor/Gestor/Gerente só entram se existirem nos dados.
     tabela(pessoas(inj)[["Semana", "Nome", "Líder Direto"] +
                         [c for c in ["Supervisor", "Gestor", "Gerente"] if c in pessoas(inj).columns] +
-                        ["Branch", "Outro (detalhado)"]], "faltas_injustificadas.csv")
+                        ["Branch", COL_COMENTARIO]], "faltas_injustificadas.csv")
 
 # Ausências com "Justificativa Base" em branco: não dá para classificar, então são listadas à parte.
 sem_base = ausentes[ausentes["classificacao"] == P.SEM_JUSTIFICATIVA]
@@ -298,12 +328,8 @@ if not sem_base.empty:
 # Só faz sentido com mais de uma semana carregada.
 if dados["semana"].nunique() > 1:
     st.subheader("Evolução semanal")
-    # Usa todas as semanas (ignora o filtro de Semana), mas respeita Branch e Office.
-    base = dados.copy()
-    if sel_branch:
-        base = base[base["branch"].isin(sel_branch)]
-    if sel_office:
-        base = base[base["office"].isin(sel_office)]
+    # Usa todas as semanas (ignora o filtro de Semana).
+    base = dados
     # Conta as faltas por semana e por classificação -> uma linha no gráfico para cada classificação.
     evo = (base[base["classificacao"] != P.PRESENTE]
            .groupby(["semana", "classificacao"]).size().rename("faltas").reset_index())

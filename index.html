@@ -23,11 +23,22 @@
         <h1>Acompanhamento<br>de faltas</h1>
       </div>
       <div class="topo__acoes">
+        <!-- Modelo de planilha: cada um tem seus próprios arquivos e regras de classificação -->
+        <div class="modelos">
+          <span class="modelos__rotulo" id="rot-modelo">Modelo de planilha</span>
+          <div class="modelos__opcoes" role="radiogroup" aria-labelledby="rot-modelo">
+            <button type="button" role="radio" data-modelo="atual" aria-checked="true">Atual</button>
+            <button type="button" role="radio" data-modelo="antigo" aria-checked="false">Antigo (integração)</button>
+          </div>
+        </div>
         <label class="btn btn--claro" for="arquivos">Adicionar planilhas</label>
         <input id="arquivos" type="file" accept=".xlsx,.xlsm,.xls,.ods,.csv,.zip" multiple hidden>
       </div>
     </div>
   </header>
+
+  <!-- Avisos de arquivos que não puderam ser carregados (fora do painel para aparecer mesmo sem dados) -->
+  <div id="erros" class="wrap" aria-live="polite"></div>
 
   <!-- Estado vazio -->
   <section id="vazio" class="wrap vazio">
@@ -36,7 +47,9 @@
         <svg viewBox="0 0 48 48" width="48" height="48"><rect x="8" y="6" width="32" height="36" fill="none" stroke="currentColor" stroke-width="3"/><path d="M24 16v16M16 24l8 8 8-8" fill="none" stroke="currentColor" stroke-width="3"/></svg>
       </span>
       <strong>Arraste aqui uma ou mais planilhas ou um arquivo .zip</strong>
-      <span>ou clique para selecionar. Aceita .xlsx, .xlsm, .xls, .ods, .csv e .zip com planilhas dentro.<br>Cada planilha é tratada como uma semana (ex.: “WM43 …”).</span>
+      <span>ou clique para selecionar. Aceita .xlsx, .xlsm, .xls, .ods, .csv e .zip com planilhas dentro.<br>Cada planilha é uma semana: o nome do arquivo precisa conter “WM” e o número da semana (ex.: “WM43 - ATA 2026.xlsx”).</span>
+      <span class="drop__modelo" data-so="atual">Modelo atual: colunas “Report1”, “Justificativa Base”, “Report” e “Outro (detalhado)”.</span>
+      <span class="drop__modelo" data-so="antigo" hidden>Layout antigo (integração): só a coluna “Report”, com “Yes”, “Absence” ou o motivo da falta.</span>
     </label>
   </section>
 
@@ -46,7 +59,6 @@
       <div id="chips" class="chips" aria-label="Arquivos carregados"></div>
       <div id="filtros" class="filtros"></div>
     </section>
-    <div id="erros" class="wrap"></div>
 
     <!-- KPIs -->
     <section class="faixa-azul">
@@ -89,19 +101,21 @@
       <div class="secao__cab">
         <div>
           <h2>Faltas justificadas</h2>
-          <p class="sub">Contagem de cada opção de “Justificativa Base” e dos motivos informados em “Outro (detalhado)”.</p>
+          <p class="sub" data-so="atual">Contagem de cada opção de “Justificativa Base” e dos motivos informados em “Outro (detalhado)”.</p>
+          <p class="sub" data-so="antigo" hidden>Contagem de cada motivo informado na coluna “Report” (todos os valores diferentes de “Yes” e “Absence”).</p>
         </div>
       </div>
-      <div class="grade-3">
+      <div id="grade-just" class="grade-3">
         <div class="cartao">
           <h3>Composição das faltas</h3>
           <div id="g-donut" class="grafico grafico--donut"></div>
         </div>
         <div class="cartao">
-          <h3>Por Justificativa Base <span class="sub-inline">(exceto “Outros”)</span></h3>
+          <h3 data-so="atual">Por Justificativa Base <span class="sub-inline">(exceto “Outros”)</span></h3>
+          <h3 data-so="antigo" hidden>Por motivo <span class="sub-inline">(coluna “Report”)</span></h3>
           <div id="g-just" class="grafico"></div>
         </div>
-        <div class="cartao">
+        <div class="cartao" data-so="atual">
           <h3>Justificadas via “Outros”</h3>
           <div id="g-outros" class="grafico"></div>
         </div>
@@ -117,7 +131,8 @@
       <div class="secao__cab">
         <div>
           <h2>Faltas injustificadas</h2>
-          <p class="sub">Justificativa Base = “Outros (detalhe ao lado)” e Report = “Absence”.</p>
+          <p class="sub" data-so="atual">Justificativa Base = “Outros (detalhe ao lado)” e Report = “Absence”.</p>
+          <p class="sub" data-so="antigo" hidden>Report = “Absence”. O comentário vem da coluna “Injustificada”, quando preenchida.</p>
         </div>
       </div>
       <div class="cartao cartao--destaque">
@@ -131,7 +146,7 @@
       <div class="secao__cab">
         <div>
           <h2>Evolução semanal</h2>
-          <p class="sub">Faltas por tipo em todas as semanas carregadas (respeita os filtros de Branch e Office).</p>
+          <p class="sub">Faltas por tipo em todas as semanas carregadas.</p>
         </div>
       </div>
       <div class="cartao"><div id="g-evo" class="grafico grafico--linha"></div></div>

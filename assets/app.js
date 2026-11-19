@@ -5,9 +5,10 @@
    navegador e somem ao fechar a página.
 
    Fluxo geral:
+     0. O usuário escolhe o modelo de planilha (atual ou antigo)   -> trocarModelo()
      1. O usuário escolhe ou arrasta arquivos (planilhas ou .zip)   -> carregarArquivos()
      2. Cada planilha vira uma lista de linhas padronizadas        -> lerPlanilha()
-     3. Os filtros (Semana, Branch, Office) definem o recorte      -> recorte()
+     3. O filtro de Semana define o recorte                         -> recorte()
      4. O painel é redesenhado: KPIs, gráficos e tabelas           -> renderPainel()
 
    As regras de classificação são as mesmas do processamento.py (versão Python);
@@ -54,11 +55,22 @@
     gerente: ['gerente'],
     report1: ['report1'],              // presença: "Yes" ou "Absence"
     just_base: ['justificativas base', 'justificativa base'],
-    report: ['report'],                // separa "Outros" justificado de injustificado
+    report: ['report'],                // modelo atual: separa "Outros" justificado de injustificado; layout antigo: presença e motivo
     outro: ['outro (detalhado)', 'outros (detalhado)'], // texto livre do motivo
+    obs: ['injustificada'],            // layout antigo: comentário sobre a falta injustificada
   };
-  // Sem estas colunas não dá para classificar as faltas; a planilha é recusada com erro.
-  const OBRIGATORIAS = ['nome', 'report1', 'just_base', 'report'];
+
+  // Os dois modelos de planilha aceitos. O usuário escolhe o modelo no topo da página;
+  // cada um tem seus próprios arquivos carregados.
+  //   atual:  colunas Report1 (presença) + Justificativa Base + Report + Outro (detalhado)
+  //   antigo: só a coluna Report, com "Yes", "Absence" ou o motivo da falta
+  //           ("Justified", "Vacation", "Medical Absence"...) + coluna opcional "Injustificada"
+  //   obrig: colunas sem as quais a planilha é recusada
+  //   cats:  tipos de falta que o modelo consegue identificar
+  const MODELOS = {
+    atual: { rotulo: 'Modelo atual', obrig: ['nome', 'report1', 'just_base', 'report'], cats: [CAT.J, CAT.JO, CAT.INJ, CAT.SEM] },
+    antigo: { rotulo: 'Layout antigo', obrig: ['nome', 'report'], cats: [CAT.J, CAT.INJ] },
+  };
   // Níveis hierárquicos exibidos nas abas: chave interna -> nome na tela.
   const NIVEIS = { lider: 'Líder Direto', supervisor: 'Supervisor', gerente: 'Gerente' };
   // Coluna usada por padrão em cada nível (a de mesmo nome).
@@ -97,24 +109,65 @@
 
   // Extrai a semana do nome do arquivo: "WM43 - ATA 2026.xlsx" -> "WM43".
   // O número fica com 2 dígitos ("WM5" -> "WM05") para a ordenação funcionar.
-  // Sem "WM<número>" no nome, usa o próprio nome do arquivo.
+  // Devolve null se o nome não tiver "WM" seguido de um número de semana válido (1 a 53).
   function semanaDoArquivo(nome) {
-    const m = nome.match(/WM\s*(\d{1,2})/i);
-    return m ? 'WM' + String(+m[1]).padStart(2, '0') : nome.replace(/\.xlsx?$/i, '');
+    const m = nome.match(/WM\s*(\d{1,2})(?!\d)/i);
+    if (!m || +m[1] < 1 || +m[1] > 53) return null;
+    return 'WM' + String(+m[1]).padStart(2, '0');
   }
 
+  // Nome das colunas obrigatórias como aparecem na planilha (usado nas mensagens de erro).
+  const NOME_COLUNA = { nome: 'Full Name', report1: 'Report1', just_base: 'Justificativa Base', report: 'Report' };
+
   // ------------------------------------------------------------ leitura e regras
-  // Regras de classificação de cada participante:
+  // Regras de classificação de cada participante.
+  // Modelo atual:
   //   Report1 ≠ Absence                                   -> Presente
   //   Justificativa Base = "Outros" e Report = Absence    -> Injustificada
   //   Justificativa Base = "Outros" e Report ≠ Absence    -> Justificada (Outros)
   //   Justificativa Base preenchida com outra opção       -> Justificada
   //   Justificativa Base vazia                            -> Ausente sem justificativa base
-  function classificar(r) {
+  // Layout antigo (só a coluna Report):
+  //   Report = Yes (ou vazio)                             -> Presente
+  //   Report = Absence                                    -> Injustificada
+  //   Report = qualquer outro motivo (Justified, Vacation...) -> Justificada
+  function classificar(r, modelo) {
+    if (modelo === 'antigo') {
+      const v = norm(r.report);
+      if (!v || v === 'yes') return CAT.PRES;
+      return v === 'absence' ? CAT.INJ : CAT.J;
+    }
     if (norm(r.report1) !== 'absence') return CAT.PRES;
     if (norm(r.just_base).startsWith('outros')) return norm(r.report) === 'absence' ? CAT.INJ : CAT.JO;
     if (norm(r.just_base)) return CAT.J;
     return CAT.SEM;
+  }
+
+  // Descobre a linha de cabeçalho de uma aba e de qual modelo ela é.
+  // Olha as 15 primeiras linhas: se tiver "Report1" é o modelo atual; se tiver "Report"
+  // junto com "Full Name" ou "Líder Direto" (sem "Report1") é o layout antigo.
+  // A exigência do nome/líder evita confundir com a aba "Report" exportada do Teams.
+  function acharCabecalho(linhas) {
+    for (let i = 0; i < Math.min(15, linhas.length); i++) {
+      if (!Array.isArray(linhas[i])) continue;
+      const cel = linhas[i].map(norm);
+      if (cel.includes('report1')) return { iCab: i, modelo: 'atual' };
+      if (cel.includes('report') && (cel.includes('full name') || cel.includes('lider direto'))) return { iCab: i, modelo: 'antigo' };
+    }
+    return null;
+  }
+
+  // Erro de planilha carregada no modelo errado. Leva junto o modelo certo, para o aviso
+  // oferecer o botão que abre o arquivo no outro modelo.
+  class ModeloDiferente extends Error {
+    constructor(certo) {
+      super(certo === 'antigo'
+        ? 'Esta planilha está no layout antigo (só com a coluna "Report", sem "Report1" e "Justificativa Base"). ' +
+          'Use o botão acima para abri-la no Layout antigo.'
+        : 'Esta planilha está no modelo atual (com as colunas "Report1" e "Justificativa Base"). ' +
+          'Use o botão acima para abri-la no Modelo atual.');
+      this.certo = certo;
+    }
   }
 
   // Junta variações de escrita do motivo em "Outro (detalhado)":
@@ -127,15 +180,47 @@
 
   // Lê uma planilha (conteúdo em bytes) e devolve uma lista de participantes já padronizados.
   // A planilha tem várias abas (MoM, Attendance, Report...) e o cabeçalho nem sempre está
-  // na primeira linha: usa a primeira aba que tiver a célula "Report1" nas 15 primeiras linhas.
-  function lerPlanilha(buffer, nomeArquivo) {
-    const wb = XLSX.read(buffer, { type: 'array' });
-    for (const aba of wb.SheetNames) {
-      // Cada linha vira um array de células (header: 1), mantendo as vazias como null.
-      const linhas = XLSX.utils.sheet_to_json(wb.Sheets[aba], { header: 1, defval: null, blankrows: true });
-      const iCab = linhas.slice(0, 15).findIndex(l => Array.isArray(l) && l.some(v => norm(v) === 'report1'));
-      if (iCab < 0) continue; // esta aba não tem os dados de presença; tenta a próxima
+  // na primeira linha: usa a primeira aba cujo cabeçalho seja do modelo escolhido (ver acharCabecalho).
+  // Qualquer problema gera um erro com uma mensagem explicando o que corrigir.
+  function lerPlanilha(buffer, nomeArquivo, modelo) {
+    // 1. O nome do arquivo precisa indicar a semana.
+    const semana = semanaDoArquivo(nomeArquivo);
+    if (!semana) {
+      throw new Error('O nome do arquivo precisa indicar a semana: "WM" seguido do número da semana (1 a 53), ' +
+        'por exemplo "WM43 - ATA 2026.xlsx". Renomeie o arquivo e carregue novamente.');
+    }
 
+    // 2. O arquivo precisa abrir como planilha.
+    let wb;
+    try {
+      wb = XLSX.read(buffer, { type: 'array' });
+    } catch (err) {
+      if (/password|encrypt/i.test(err.message)) {
+        throw new Error('O arquivo está protegido por senha. Remova a senha no Excel e carregue novamente.');
+      }
+      throw new Error('Não foi possível abrir o arquivo. Ele pode estar corrompido ou não ser uma planilha válida. ' +
+        'Tente abri-lo no Excel e salvá-lo novamente como .xlsx.');
+    }
+
+    // 3. Procura a aba com os dados de presença. Cada linha vira um array de células
+    //    (header: 1), mantendo as vazias como null.
+    const abas = wb.SheetNames.map(aba => {
+      const linhas = XLSX.utils.sheet_to_json(wb.Sheets[aba], { header: 1, defval: null, blankrows: true });
+      return { aba, linhas, ...acharCabecalho(linhas) };
+    });
+    const alvo = abas.find(a => a.modelo === modelo);
+    if (!alvo) {
+      // Nenhuma aba do modelo escolhido: avisa se a planilha é do outro modelo.
+      const outra = abas.find(a => a.modelo);
+      if (outra) throw new ModeloDiferente(outra.modelo);
+      throw new Error(modelo === 'antigo'
+        ? 'Nenhuma aba da planilha tem as colunas "Full Name" e "Report". ' +
+          'Confira se este é o arquivo de presença da Weekly Meeting (com a aba "Attendance").'
+        : 'Nenhuma aba da planilha tem a coluna "Report1". ' +
+          'Confira se este é o arquivo de presença da Weekly Meeting (com a aba "Attendance").');
+    }
+    {
+      const { aba, linhas, iCab } = alvo;
       // idx: nome interno da coluna -> posição dela na linha. Se duas colunas
       // corresponderem ao mesmo nome, vale a primeira.
       const idx = {};
@@ -143,10 +228,13 @@
         const n = norm(c);
         for (const [k, vars] of Object.entries(COLUNAS)) if (vars.includes(n) && !(k in idx)) idx[k] = j;
       });
-      const faltando = OBRIGATORIAS.filter(k => !(k in idx));
-      if (faltando.length) throw new Error(`colunas obrigatórias ausentes na aba "${aba}": ${faltando.join(', ')}`);
+      // 4. As colunas obrigatórias precisam existir.
+      const faltando = MODELOS[modelo].obrig.filter(k => !(k in idx));
+      if (faltando.length) {
+        throw new Error(`A aba "${aba}" não tem ${faltando.length > 1 ? 'as colunas obrigatórias' : 'a coluna obrigatória'} ` +
+          `${faltando.map(k => `"${NOME_COLUNA[k]}"`).join(', ')}. Confira se os títulos das colunas não foram alterados.`);
+      }
 
-      const semana = semanaDoArquivo(nomeArquivo);
       const linhasOk = [];
       for (const l of linhas.slice(iCab + 1)) {
         if (!Array.isArray(l)) continue;
@@ -154,16 +242,20 @@
         const nome = limpa(get('nome'));
         if (!nome) continue; // linha sem nome (em branco, totais etc.) é ignorada
         const r = { arquivo: nomeArquivo, semana, nome };
-        for (const k of ['email', 'cargo', 'report1', 'just_base', 'report', 'outro']) r[k] = limpa(get(k));
+        for (const k of ['email', 'cargo', 'report1', 'just_base', 'report', 'outro', 'obs']) r[k] = limpa(get(k));
         // Hierarquia e local vazios viram "(sem informação)", que aparece como um grupo próprio.
         for (const k of ['lider', 'supervisor', 'gestor', 'gerente', 'branch', 'office']) r[k] = limpa(get(k)) ?? SEM_INFO;
-        r.classificacao = classificar(r);
+        r.classificacao = classificar(r, modelo);
+        // Motivo da falta justificada usado no gráfico "Por motivo": a Justificativa Base
+        // no modelo atual; o próprio valor de Report ("Vacation", "Justified"...) no layout antigo.
+        r.motivo = modelo === 'antigo' ? r.report : r.just_base;
         r.outro_agrupado = agruparDetalhe(r.outro);
         linhasOk.push(r);
       }
+      // 5. Precisa haver ao menos um participante.
+      if (!linhasOk.length) throw new Error(`A aba "${aba}" não tem nenhum participante preenchido abaixo do cabeçalho.`);
       return linhasOk;
     }
-    throw new Error('nenhuma aba com a coluna "Report1" foi encontrada');
   }
 
   // Agrupa as faltas por uma coluna de hierarquia (ex.: 'lider').
@@ -187,17 +279,24 @@
 
   // ------------------------------------------------------------ estado
   // Tudo o que o usuário carregou ou escolheu fica aqui; a tela é sempre desenhada a partir deste objeto.
-  const estado = {
+  // Cada modelo de planilha tem o seu estado, então trocar de modelo não perde os arquivos do outro.
+  const novoEstado = () => ({
     arquivos: new Map(), // nome -> linhas
-    erros: [],           // mensagens exibidas no topo do painel
+    erros: [],           // arquivos que não puderam ser carregados: { arquivo, origem, msg }
+    mover: null,         // planilhas do outro modelo na última carga: { modelo, planilhas }
     semanas: null,       // Set selecionado (null = padrão: última semana)
-    branch: new Set(),   // vazio = todas as branches
-    office: new Set(),   // vazio = todos os offices
     mapa: { ...MAPA_PADRAO }, // nível -> coluna da planilha
     nivel: 'lider',      // aba de hierarquia aberta
-  };
+  });
+  const estados = { atual: novoEstado(), antigo: novoEstado() };
+  let modelo = 'atual';          // modelo de planilha selecionado no topo
+  let estado = estados[modelo];  // estado do modelo selecionado
+  // Tipos de falta que o modelo selecionado consegue identificar (ordem dos gráficos).
+  const catsModelo = () => MODELOS[modelo].cats;
   // Todas as linhas de todos os arquivos carregados, numa lista só.
   const todas = () => [...estado.arquivos.values()].flat();
+  // Registra um arquivo que não pôde ser carregado (origem = nome do .zip, quando veio de um).
+  const erro = (arquivo, msg, origem = null) => estado.erros.push({ arquivo, msg, origem });
 
   // ------------------------------------------------------------ upload
   // Botão "Adicionar planilhas". O valor é limpo depois da leitura para permitir
@@ -218,33 +317,53 @@
   const EXT_PLANILHA = /\.(xlsx|xlsm|xls|ods|csv)$/i;
   const EXT_ZIP = /\.zip$/i;
 
-  // Ao soltar arquivos, carrega só os de formato aceito; se nenhum servir, mostra um aviso.
+  // Ao soltar arquivos, tenta carregá-los; os de formato não aceito geram aviso em expandir().
   document.addEventListener('drop', e => {
-    const fs = [...(e.dataTransfer?.files || [])].filter(f => EXT_PLANILHA.test(f.name) || EXT_ZIP.test(f.name));
+    const fs = [...(e.dataTransfer?.files || [])];
     if (fs.length) carregarArquivos(fs);
-    else if (e.dataTransfer?.files?.length) { estado.erros.push('Formato não suportado: use .xlsx, .xlsm, .xls, .ods, .csv ou .zip'); renderErros(); }
   });
 
-  // Converte a seleção em uma lista de planilhas { nome, buffer }, abrindo arquivos .zip
+  // Converte a seleção em uma lista de planilhas { nome, buffer }, abrindo arquivos .zip.
+  // Arquivos que não servem são registrados em estado.erros com o motivo.
   async function expandir(files) {
     const planilhas = [];
     for (const f of files) {
       const base = f.name.split(/[\\/]/).pop(); // só o nome, sem a pasta
-      if (base.startsWith('~$')) continue;      // arquivo temporário do Excel (planilha aberta)
-      if (EXT_PLANILHA.test(base)) { planilhas.push({ nome: base, buffer: await f.arrayBuffer() }); continue; }
-      if (!EXT_ZIP.test(base)) { estado.erros.push(`${base}: formato não suportado`); continue; }
+      if (base.startsWith('~$')) {
+        erro(base, 'Este é um arquivo temporário que o Excel cria enquanto a planilha está aberta. ' +
+          'Carregue o arquivo original (sem "~$" no início do nome).');
+        continue;
+      }
+      const ehPlanilha = EXT_PLANILHA.test(base), ehZip = EXT_ZIP.test(base);
+      if (!ehPlanilha && !ehZip) { erro(base, 'Formato não suportado. Use .xlsx, .xlsm, .xls, .ods, .csv ou .zip.'); continue; }
+
+      // A leitura pode falhar se o arquivo estiver aberto e travado por outro programa (ex.: Excel)
+      // ou se for um arquivo do OneDrive/SharePoint que está só na nuvem.
+      let buffer;
       try {
-        const zip = await JSZip.loadAsync(await f.arrayBuffer());
+        buffer = await f.arrayBuffer();
+      } catch {
+        erro(base, 'Não foi possível ler o arquivo. Ele pode estar aberto no Excel ou em outro programa: ' +
+          'feche-o e tente novamente. Se estiver no OneDrive ou no SharePoint, baixe-o para o computador antes.');
+        continue;
+      }
+      if (ehPlanilha) { planilhas.push({ nome: base, buffer }); continue; }
+
+      try {
+        const zip = await JSZip.loadAsync(buffer);
         // Dentro do .zip, pega só planilhas; ignora pastas, arquivos ocultos,
         // temporários do Excel e a pasta __MACOSX que o Mac cria ao compactar.
         const entradas = Object.values(zip.files).filter(z => {
           const n = z.name.split('/').pop();
           return !z.dir && !z.name.startsWith('__MACOSX/') && !n.startsWith('~$') && !n.startsWith('.') && EXT_PLANILHA.test(n);
         });
-        if (!entradas.length) { estado.erros.push(`${base}: nenhuma planilha encontrada dentro do .zip`); continue; }
+        if (!entradas.length) {
+          erro(base, 'O .zip não contém nenhuma planilha (.xlsx, .xlsm, .xls, .ods ou .csv).');
+          continue;
+        }
         for (const z of entradas) planilhas.push({ nome: z.name.split('/').pop(), buffer: await z.async('arraybuffer'), origem: base });
-      } catch (err) {
-        estado.erros.push(`${base}: não foi possível abrir o .zip (${err.message})`);
+      } catch {
+        erro(base, 'Não foi possível abrir o .zip. Ele pode estar corrompido ou protegido por senha.');
       }
     }
     return planilhas;
@@ -254,17 +373,79 @@
   // Um arquivo com o mesmo nome de outro já carregado substitui o anterior.
   // Um arquivo com problema não impede os outros de serem carregados.
   async function carregarArquivos(files) {
-    for (const p of await expandir(files)) {
+    estado.erros = []; // os avisos sempre se referem à última tentativa de carregar arquivos
+    estado.mover = null;
+
+    // As bibliotecas de leitura vêm da internet; sem elas não há como ler nada.
+    if (!window.XLSX || !window.JSZip || !window.echarts) {
+      erro(null, 'Os componentes de leitura de planilhas não carregaram. ' +
+        'Verifique a conexão com a internet e recarregue a página.');
+      renderErros();
+      return;
+    }
+    processarPlanilhas(await expandir(files));
+  }
+
+  // Lê as planilhas já extraídas ({ nome, buffer, origem }) no modelo selecionado e redesenha o painel.
+  // As que forem do outro modelo ficam guardadas em estado.mover, para o botão do aviso.
+  function processarPlanilhas(planilhas) {
+    for (const p of planilhas) {
       try {
-        estado.arquivos.set(p.nome, lerPlanilha(p.buffer, p.nome));
-        estado.erros = estado.erros.filter(e => !e.startsWith(p.nome)); // apaga erro antigo deste arquivo
+        const linhas = lerPlanilha(p.buffer, p.nome, modelo);
+        // Não aceita dois arquivos diferentes da mesma semana (as faltas seriam contadas em dobro).
+        const semana = linhas[0].semana;
+        const outro = [...estado.arquivos.keys()].find(n => n !== p.nome && estado.arquivos.get(n)[0].semana === semana);
+        if (outro) {
+          throw new Error(`A semana ${semana} já foi carregada pelo arquivo "${outro}". ` +
+            'Remova esse arquivo (no × da etiqueta) antes de carregar outro da mesma semana.');
+        }
+        estado.arquivos.set(p.nome, linhas);
       } catch (err) {
-        estado.erros.push(`${p.nome}${p.origem ? ` (dentro de ${p.origem})` : ''}: ${err.message}`);
+        erro(p.nome, err.message, p.origem);
+        if (err instanceof ModeloDiferente) {
+          estado.mover ??= { modelo: err.certo, planilhas: [] };
+          estado.mover.planilhas.push(p);
+        }
       }
     }
     estado.semanas = null; // volta o filtro de semana para "a mais recente"
     ajustarMapaPadrao();
     renderTudo();
+  }
+
+  // ------------------------------------------------------------ modelo de planilha
+  // Botões "Atual" / "Antigo (integração)" no topo da página.
+  const botoesModelo = [...document.querySelectorAll('[data-modelo]')];
+  botoesModelo.forEach(b => b.addEventListener('click', () => trocarModelo(b.dataset.modelo)));
+
+  // Troca o modelo exibido. Os arquivos de cada modelo continuam carregados no seu próprio estado.
+  function trocarModelo(m) {
+    if (m === modelo) return;
+    modelo = m;
+    estado = estados[m];
+    aplicarModelo();
+    renderTudo();
+  }
+
+  // Abre no outro modelo as planilhas que foram recusadas por serem dele (botão do aviso).
+  function moverPlanilhas() {
+    const { modelo: destino, planilhas } = estado.mover;
+    const nomes = new Set(planilhas.map(p => p.nome));
+    estado.erros = estado.erros.filter(e => !nomes.has(e.arquivo)); // tira os avisos desses arquivos
+    estado.mover = null;
+    trocarModelo(destino);
+    estado.erros = [];
+    estado.mover = null;
+    processarPlanilhas(planilhas);
+  }
+
+  // Ajusta a parte fixa da página ao modelo: botão marcado, textos e cartões que só existem
+  // em um dos modelos (marcados no HTML com data-so="atual" ou data-so="antigo").
+  function aplicarModelo() {
+    botoesModelo.forEach(b => b.setAttribute('aria-checked', String(b.dataset.modelo === modelo)));
+    document.querySelectorAll('[data-so]').forEach(e => { e.hidden = e.dataset.so !== modelo; });
+    // Sem o cartão "via Outros", a grade de justificadas passa de 3 para 2 colunas.
+    $('#grade-just').classList.toggle('grade-2', modelo === 'antigo');
   }
 
   // Decide quais níveis hierárquicos aparecem, conforme as colunas preenchidas nos dados.
@@ -281,13 +462,10 @@
   }
 
   // ------------------------------------------------------------ recorte
-  // Linhas que passam nos filtros. Filtro de Branch/Office vazio = sem restrição.
+  // Linhas das semanas selecionadas no filtro.
   // ignorarSemana: usado na evolução semanal, que mostra todas as semanas.
   function recorte({ ignorarSemana = false } = {}) {
-    return todas().filter(r =>
-      (ignorarSemana || estado.semanas.has(r.semana)) &&
-      (!estado.branch.size || estado.branch.has(r.branch)) &&
-      (!estado.office.size || estado.office.has(r.office)));
+    return todas().filter(r => ignorarSemana || estado.semanas.has(r.semana));
   }
 
   // ------------------------------------------------------------ render geral
@@ -309,16 +487,33 @@
     if (!estado.semanas.size) estado.semanas = new Set(semanas.slice(-1));
 
     renderChips();
-    renderFiltros(dados, semanas);
+    renderFiltros(semanas);
     renderConfig(dados);
     renderPainel();
     observarRevela();
   }
 
-  // Mostra os avisos de arquivos que não puderam ser lidos.
+  // Mostra o aviso com os arquivos que não puderam ser carregados: nome do arquivo,
+  // motivo e o que fazer. Fica fora do painel, então aparece mesmo quando nenhum arquivo carregou.
   function renderErros() {
     const box = $('#erros');
-    box.replaceChildren(...estado.erros.map(e => el('div', { class: 'alerta' }, '⚠ ', e)));
+    const n = estado.erros.length;
+    if (!n) { box.replaceChildren(); return; }
+    const fechar = () => { estado.erros = []; estado.mover = null; renderErros(); };
+    // Planilhas do outro modelo: um botão abre todas elas lá de uma vez.
+    const mv = estado.mover;
+    const botaoMover = mv && el('button', { type: 'button', class: 'btn btn--azul btn--mini alerta__acao', onclick: moverPlanilhas },
+      mv.planilhas.length === 1 ? `Abrir no ${MODELOS[mv.modelo].rotulo}` : `Abrir os ${mv.planilhas.length} arquivos no ${MODELOS[mv.modelo].rotulo}`);
+    box.replaceChildren(el('div', { class: 'alerta alerta--erro', role: 'alert' },
+      el('div', { class: 'alerta__cab' },
+        el('strong', {}, n === 1 ? '⚠ Não foi possível carregar 1 arquivo' : `⚠ Não foi possível carregar ${n} arquivos`),
+        el('button', { type: 'button', class: 'alerta__fechar', 'aria-label': 'Fechar aviso', onclick: fechar }, '×')),
+      botaoMover,
+      el('ul', { class: 'alerta__lista' }, estado.erros.map(e => el('li', {},
+        e.arquivo ? el('b', {}, e.arquivo) : null,
+        e.origem ? el('span', { class: 'alerta__origem' }, ` (dentro de ${e.origem})`) : null,
+        e.arquivo ? el('br') : null,
+        e.msg)))));
   }
 
   // Etiquetas dos arquivos carregados ("WM43 · 398 pessoas"), com botão × para remover.
@@ -334,8 +529,8 @@
   //   rotulo: nome do filtro ("Semana")
   //   opcoes: valores possíveis
   //   selecionados: Set alterado diretamente quando o usuário marca/desmarca
-  //   vazioSignificaTodos: true em Branch/Office (nada marcado = todos);
-  //                        false em Semana (sempre precisa de ao menos uma marcada)
+  //   vazioSignificaTodos: true = nada marcado equivale a todos;
+  //                        false = sempre precisa de ao menos uma marcada (caso do filtro Semana)
   //   aoMudar: função chamada a cada mudança (redesenha o painel)
   function filtroMulti(rotulo, opcoes, selecionados, vazioSignificaTodos, aoMudar) {
     // Texto curto mostrado no botão do filtro: "Todos", "WM43, WM44", "3 selecionados"...
@@ -378,14 +573,9 @@
     document.querySelectorAll('details.filtro[open]').forEach(d => { if (!d.contains(e.target)) d.open = false; });
   });
 
-  // Monta os filtros Semana, Branch e Office a partir dos valores existentes nos dados.
-  function renderFiltros(dados, semanas) {
-    const unicos = c => [...new Set(dados.map(r => r[c]))].sort((a, b) => a.localeCompare(b));
-    $('#filtros').replaceChildren(
-      filtroMulti('Semana', semanas, estado.semanas, false, renderPainel),
-      filtroMulti('Branch', unicos('branch'), estado.branch, true, renderPainel),
-      filtroMulti('Office', unicos('office'), estado.office, true, renderPainel),
-    );
+  // Monta o filtro de Semana com as semanas carregadas.
+  function renderFiltros(semanas) {
+    $('#filtros').replaceChildren(filtroMulti('Semana', semanas, estado.semanas, false, renderPainel));
   }
 
   // Painel "Configurar hierarquia": uma caixa de seleção por nível para escolher
@@ -423,7 +613,8 @@
     animarNumero('justificadas', n(CAT.J) + n(CAT.JO));
     animarNumero('injustificadas', n(CAT.INJ));
     $('[data-kpi-pct="faltas"]').textContent = `${pct(aus.length, df.length)} do total`;
-    $('[data-kpi-extra="justificadas"]').textContent = `${n(CAT.JO)} via “Outros”`;
+    // O layout antigo não tem a opção "Outros", então o detalhe só aparece no modelo atual.
+    $('[data-kpi-extra="justificadas"]').textContent = modelo === 'atual' ? `${n(CAT.JO)} via “Outros”` : '';
 
     renderHierarquia(df);
     renderJustificadas(aus);
@@ -472,8 +663,8 @@
       grafico('g-hier', opcaoEmpilhada(tab), Math.max(280, tab.length * 30 + 80)); // altura cresce com o nº de pessoas
     }
     const rot = NIVEIS[estado.nivel];
-    // A coluna "sem justificativa base" só aparece na tabela se houver algum caso.
-    const cats = FALTAS.filter(c => c !== CAT.SEM || tab.some(t => t[c]));
+    // Colunas: os tipos de falta do modelo; "sem justificativa base" só aparece se houver algum caso.
+    const cats = catsModelo().filter(c => c !== CAT.SEM || tab.some(t => t[c]));
     tabela($('#t-hier'), [
       { k: 'nome', t: rot }, ...cats.map(c => ({ k: c, t: c, num: true })),
       { k: 'total', t: 'Total de faltas', num: true }, { k: 'equipe', t: 'Equipe', num: true },
@@ -485,7 +676,7 @@
   // dividida pelo tipo de falta).
   function opcaoEmpilhada(tab) {
     const linhas = [...tab].reverse(); // maior no topo
-    const cats = FALTAS.filter(c => c !== CAT.SEM || linhas.some(r => r[c]));
+    const cats = catsModelo().filter(c => c !== CAT.SEM || linhas.some(r => r[c]));
     const series = cats.map((c, i) => ({
       name: c, type: 'bar', stack: 'total', barMaxWidth: 20,
       data: linhas.map(r => r[c] || null), // null em vez de 0: não desenha segmento vazio
@@ -525,20 +716,23 @@
   }
 
   // ---------- justificadas
-  // Rosca com a divisão das faltas por tipo, barras por Justificativa Base,
-  // barras por motivo de "Outros" e a lista de quem teve falta justificada.
+  // Rosca com a divisão das faltas por tipo, barras por motivo (Justificativa Base no modelo
+  // atual, valor de Report no layout antigo), barras por motivo de "Outros" (só no modelo atual)
+  // e a lista de quem teve falta justificada.
   function renderJustificadas(aus) {
     const cont = contar(aus, r => r.classificacao);
     const dadosDonut = FALTAS.filter(c => cont.get(c)).map(c => ({ name: c, value: cont.get(c), itemStyle: { color: CORES[c] } }));
     grafico('g-donut', aus.length ? opcaoDonut(dadosDonut, aus.length) : null, 300, 'Sem faltas.');
 
-    // Quantas vezes cada opção de "Justificativa Base" foi escolhida (exceto "Outros").
-    const just = contar(aus.filter(r => r.classificacao === CAT.J), r => r.just_base);
+    // Quantas vezes cada motivo foi informado (no modelo atual, exceto "Outros").
+    const just = contar(aus.filter(r => r.classificacao === CAT.J), r => r.motivo);
     grafico('g-just', just.size ? opcaoBarras(just, CORES[CAT.J]) : null, Math.max(240, just.size * 40 + 40), 'Nenhuma.');
 
     // Motivos escritos em "Outro (detalhado)" nas faltas justificadas via "Outros".
-    const outros = contar(aus.filter(r => r.classificacao === CAT.JO), r => r.outro_agrupado || '(não informado)');
-    grafico('g-outros', outros.size ? opcaoBarras(outros, CORES[CAT.JO]) : null, Math.max(240, outros.size * 40 + 40), 'Nenhuma.');
+    if (modelo === 'atual') {
+      const outros = contar(aus.filter(r => r.classificacao === CAT.JO), r => r.outro_agrupado || '(não informado)');
+      grafico('g-outros', outros.size ? opcaoBarras(outros, CORES[CAT.JO]) : null, Math.max(240, outros.size * 40 + 40), 'Nenhuma.');
+    }
 
     const linhas = aus.filter(r => r.classificacao === CAT.J || r.classificacao === CAT.JO);
     tabela($('#t-just'), colunasPessoa(linhas), linhas, 'faltas_justificadas.csv');
@@ -600,8 +794,9 @@
     if (!inj.length) {
       box.replaceChildren(el('p', { class: 'ok-msg' }, '✓ Nenhuma falta injustificada no recorte.'));
     } else {
-      // Tabela enxuta: quem faltou, a quem responde e o que foi escrito em "Outro (detalhado)".
-      const cols = colunasPessoa(inj).filter(c => ['semana', 'nome', 'lider', 'supervisor', 'gestor', 'gerente', 'branch', 'outro'].includes(c.k));
+      // Tabela enxuta: quem faltou, a quem responde e o comentário ("Outro (detalhado)" no modelo
+      // atual, coluna "Injustificada" no layout antigo).
+      const cols = colunasPessoa(inj).filter(c => ['semana', 'nome', 'lider', 'supervisor', 'gestor', 'gerente', 'branch', 'outro', 'obs'].includes(c.k));
       tabela(box, cols, inj, 'faltas_injustificadas.csv');
     }
     // Ausências com "Justificativa Base" em branco não podem ser classificadas; ficam num aviso separado.
@@ -618,7 +813,7 @@
 
   // ---------- evolução
   // Gráfico de linhas com as faltas por semana, uma linha por tipo de falta.
-  // Só aparece com 2 semanas ou mais. Ignora o filtro de Semana, mas respeita Branch e Office.
+  // Só aparece com 2 semanas ou mais e ignora o filtro de Semana (mostra todas).
   function renderEvolucao() {
     const semanas = [...new Set(todas().map(r => r.semana))].sort();
     const sec = $('#sec-evo');
@@ -724,18 +919,21 @@
 
   // ------------------------------------------------------------ tabelas
   // Colunas das tabelas de pessoas. Supervisor, Gestor e Gerente só aparecem
-  // se tiverem algum valor preenchido nas linhas exibidas.
+  // se tiverem algum valor preenchido nas linhas exibidas. As colunas de justificativa
+  // dependem do modelo de planilha.
   //   k: campo do dado; t: título; tag: mostra a classificação com o quadradinho colorido
   function colunasPessoa(linhas) {
     const tem = c => linhas.some(r => r[c] !== SEM_INFO);
+    const justificativa = modelo === 'antigo'
+      ? [{ k: 'report', t: 'Report' }, { k: 'obs', t: 'Injustificada (comentário)' }]
+      : [{ k: 'just_base', t: 'Justificativa Base' }, { k: 'report', t: 'Report' }, { k: 'outro', t: 'Outro (detalhado)' }];
     return [
       { k: 'semana', t: 'Semana' }, { k: 'nome', t: 'Nome' }, { k: 'lider', t: 'Líder Direto' },
       tem('supervisor') && { k: 'supervisor', t: 'Supervisor' },
       tem('gestor') && { k: 'gestor', t: 'Gestor' },
       tem('gerente') && { k: 'gerente', t: 'Gerente' },
       { k: 'branch', t: 'Branch' }, { k: 'office', t: 'Office' },
-      { k: 'just_base', t: 'Justificativa Base' }, { k: 'report', t: 'Report' },
-      { k: 'outro', t: 'Outro (detalhado)' }, { k: 'classificacao', t: 'Classificação', tag: true },
+      ...justificativa, { k: 'classificacao', t: 'Classificação', tag: true },
     ].filter(Boolean);
   }
 
@@ -767,6 +965,7 @@
         el('table', {}, el('thead', {}, el('tr', {}, cols.map(c => el('th', {}, c.t)))), el('tbody', {}, corpo))));
   }
 
-  // Primeira renderização: mostra a tela inicial (nenhum arquivo carregado).
+  // Primeira renderização: mostra a tela inicial (nenhum arquivo carregado) no modelo atual.
+  aplicarModelo();
   renderTudo();
 })();

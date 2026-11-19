@@ -11,7 +11,37 @@ Formatos aceitos: `.xlsx`, `.xlsm`, `.xls`, `.ods`, `.csv` e `.zip` contendo qua
 
 Os arquivos são processados **somente no navegador** — nada é enviado a servidores.
 
+## Modelos de planilha
+
+No topo da página (ou na barra lateral da versão Python) escolha o modelo da planilha. Cada modelo guarda seus próprios arquivos carregados.
+
+| Modelo | Colunas | O que o painel mostra |
+|---|---|---|
+| **Atual** | `Full Name`, `Report1`, `Justificativa Base`, `Report`, `Outro (detalhado)` | Tudo descrito acima |
+| **Antigo (integração)** | `Full Name`, `Report` (+ `Injustificada`, opcional) | Faltas por hierarquia, justificadas por motivo, injustificadas com comentário e evolução semanal. Não tem o gráfico de "Outros" |
+
+Se uma planilha for carregada no modelo errado, o aviso mostra um botão para abri-la no modelo certo.
+
+## Requisitos do arquivo
+
+- **Nome**: precisa conter `WM` seguido do número da semana (1 a 53), ex.: `WM43 - ATA 2026.xlsx`.
+- **Conteúdo**: uma aba com as colunas do modelo escolhido (veja acima). A coluna `Outro (detalhado)`, a `Injustificada` e as de hierarquia são opcionais.
+- **Uma planilha por semana**: um segundo arquivo da mesma semana é recusado, para as faltas não serem contadas em dobro.
+
+Arquivos fora desses requisitos não são carregados e aparecem num aviso com o motivo e o que fazer para corrigir
+(nome sem a semana, formato não aceito, arquivo corrompido, com senha ou aberto no Excel, colunas faltando, planilha vazia, semana repetida, .zip sem planilhas).
+
 ## Regras de classificação
+
+**Layout antigo** (só a coluna `Report`):
+
+| Report | Classificação |
+|---|---|
+| Yes (ou vazio) | Presente |
+| Absence | Injustificada (o comentário vem da coluna `Injustificada`) |
+| Qualquer outro valor (Justified, Vacation, Medical Absence, Maternity Leave...) | Justificada, com o próprio valor como motivo |
+
+**Modelo atual**:
 
 | Report1 | Justificativa Base | Report | Classificação |
 |---|---|---|---|
